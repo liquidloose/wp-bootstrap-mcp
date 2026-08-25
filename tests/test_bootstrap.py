@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from conftest import copy_clone
+from wp_bootstrap_mcp.bootstrap import (
+    apply_defaults,
+    bootstrap_site,
+    clone_content_repo,
+)
+from wp_bootstrap_mcp.config import Settings
+from wp_bootstrap_mcp.envfile import parse_env_file
+from wp_bootstrap_mcp.errors import BootstrapError
+from wp_bootstrap_mcp.paths import next_site_path, validate_magicdns_hostname
+from wp_bootstrap_mcp.sites import list_sites
+
+
+def _settings(workspace: Path, ts_authkey: str = "") -> Settings:
+    return Settings(
+        workspace_root=workspace,
+        env_repo_url="git@example.com:env.git",
+        tailnet_dns_suffix="ferret-boa.ts.net",
+        ts_authkey=ts_authkey,
+    )
+
+
+def test_missing_hostname_does_nothing(workspace: Path, env_repo: Path) -> None:
+    with pytest.raises(BootstrapError, match="MagicDNS hostname is required"):
+        bootstrap_site(
+            _settings(workspace),
+            slug="josh-hines",
+            magicdns_hostname="",
+            clone_fn=copy_clone(env_repo),
+        )
+    assert list(workspace.iterdir()) == []
+
+
+def test_blank_hostname_whitespace_does_nothing(
+    workspace: Path, env_repo: Path
+) -> None:
+    with pytest.raises(BootstrapError, match="MagicDNS hostname is required"):
+        bootstrap_site(
+            _settings(workspace),
+            slug="josh-hines",
+            magicdns_hostname="   ",
+            clone_fn=copy_clone(env_repo),
+        )
+    assert list(workspace.iterdir()) == []
+
+
+def test_invalid_hostname_rejected() -> None:
+    with pytest.raises(BootstrapError, match="first label"):
+        validate_magicdns_hostname("josh.hines")
+    with pytest.raises(BootstrapError, match="DNS label"):
+        validate_magicdns_hostname("Josh-Hines")
+    with pytest.raises(BootstrapError, match="DNS label"):
+        validate_magicdns_hostname("-josh")
+
+
+def test_next_folder_is_14_when_13_exists(workspace: Path) -> None:
+    (workspace / "13-josh-hines").mkdir()
+    dest = next_site_path(workspace, "new-site")
+    assert dest.name == "14-new-site"
+
+
+def test_existing_dest_refused(workspace: Path) -> None:
+    (workspace / "13-josh-hines").mkdir()
+    # next number is 14; a non-directory occupying that name must be refused
+    (workspace / "14-taken").write_text("blocked", encoding="utf-8")
+    with pytest.raises(BootstrapError, match="already exists"):
+        next_site_path(workspace, "taken")
+
+
+def test_bootstrap_writes_hostname_only_to_magicdns(
+    workspace: Path, env_repo: Path
+) -> None:
+    (workspace / "13-josh-hines").mkdir()
+    (workspace / "13-josh-hines" / ".env").write_text(
+        "WEB_PORT= 9013\nPHP_MYADMIN_PORT=8013\n",
+        encoding="utf-8",
+    )
+    result = bootstrap_site(
+        _settings(workspace, ts_authkey="tskey-test"),
+        slug="New Site",
+        magicdns_hostname="josh-hines",
+        clone_fn=copy_clone(env_repo),
+    )
+    dest = Path(result["path"])
+    assert dest.name == "14-new-site"
+    assert result["magicdns_hostname"] == "josh-hines"
+    assert result["web_port"] == 9014
+    assert result["phpmyadmin_port"] == 8014
+
+    values = parse_env_file(dest / ".env")
+    assert values["TAILSCALE_MAGICDNS_HOSTNAME"] == "josh-hines"
+    assert values["TAILNET_DNS_SUFFIX"] == "ferret-boa.ts.net"
+    assert values["WEB_PORT"] == "9014"
+    assert values["PHP_MYADMIN_PORT"] == "8014"
+    assert values["DB_NAME"] == "new-site"
+    assert values["TS_AUTHKEY"] == "tskey-test"
+    assert "Ayu Dark Bordered" in (dest / ".vscode" / "settings.json").read_text()
+    assert "query-monitor" in (dest / "bin" / "wp-plugins.txt").read_text()
+
+
+def test_apply_defaults_does_not_touch_env(
+    workspace: Path, env_repo: Path
+) -> None:
+    result = bootstrap_site(
+        _settings(workspace),
+        slug="keep-env",
+        magicdns_hostname="keep-env",
+        clone_fn=copy_clone(env_repo),
+    )
+    dest = Path(result["path"])
+    env_path = dest / ".env"
+    original = env_path.read_text(encoding="utf-8")
+    env_path.write_text(original + "\n# user note\n", encoding="utf-8")
+    before = env_path.read_text(encoding="utf-8")
+
+    apply_defaults(_settings(workspace), str(dest))
+    assert env_path.read_text(encoding="utf-8") == before
+
+
+def test_content_clone_refuses_non_empty_wp_content(
+    workspace: Path, env_repo: Path, tmp_path: Path
+) -> None:
+    result = bootstrap_site(
+        _settings(workspace),
+        slug="busy",
+        magicdns_hostname="busy-site",
+        clone_fn=copy_clone(env_repo),
+    )
+    dest = Path(result["path"])
+    extra = dest / "WordPress" / "wp-content" / "themes"
+    extra.mkdir(parents=True)
+    (extra / "keep.txt").write_text("nope", encoding="utf-8")
+
+    with pytest.raises(BootstrapError, match="non-empty"):
+        clone_content_repo(
+            dest,
+            "git@example.com:content.git",
+            dest_subdir="WordPress/wp-content",
+            clone_fn=copy_clone(tmp_path / "unused"),
+        )
+
+
+def test_content_clone_allows_stock_index_only(
+    workspace: Path, env_repo: Path, tmp_path: Path
+) -> None:
+    result = bootstrap_site(
+        _settings(workspace),
+        slug="stock",
+        magicdns_hostname="stock-site",
+        clone_fn=copy_clone(env_repo),
+    )
+    dest = Path(result["path"])
+    content_src = tmp_path / "content-src"
+    content_src.mkdir()
+    (content_src / "README.md").write_text("theme", encoding="utf-8")
+
+    clone_content_repo(
+        dest,
+        "git@example.com:content.git",
+        dest_subdir="WordPress/wp-content",
+        clone_fn=copy_clone(content_src),
+    )
+    assert (dest / "WordPress" / "wp-content" / "README.md").is_file()
+    assert not (dest / "WordPress" / "wp-content" / "index.php").exists()
+
+
+def test_list_sites_reads_env(workspace: Path) -> None:
+    site = workspace / "13-josh-hines"
+    site.mkdir()
+    (site / ".env").write_text(
+        "WEB_PORT= 9013\n"
+        "PHP_MYADMIN_PORT=8013\n"
+        "TAILSCALE_MAGICDNS_HOSTNAME=josh-hines\n",
+        encoding="utf-8",
+    )
+    (workspace / "notes").mkdir()
+    sites = list_sites(workspace)
+    assert len(sites) == 1
+    assert sites[0]["slug"] == "josh-hines"
+    assert sites[0]["web_port"] == "9013"
+    assert sites[0]["magicdns_hostname"] == "josh-hines"
