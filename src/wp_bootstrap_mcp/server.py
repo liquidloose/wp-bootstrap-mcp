@@ -54,6 +54,9 @@ def bootstrap_site(
 ) -> str:
     """Clone wordpress-docker-tailscale, write `.env`, and apply editor defaults.
 
+    Also clones dark-and-light and to-tha-top into wp-content/plugins, and
+    rivers-edge-theme into wp-content/themes.
+
     magicdns_hostname is required: the MagicDNS first label only (e.g. josh-hines).
     Ask the user for it. Do not invent it or derive it from slug.
     Does not run docker compose unless start_compose is true.

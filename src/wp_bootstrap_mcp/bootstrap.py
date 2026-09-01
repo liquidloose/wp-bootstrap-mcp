@@ -29,7 +29,7 @@ def bootstrap_site(
     phpmyadmin_port: int | None = None,
     start_compose: bool = False,
     clone_fn=git_clone,
-) -> dict[str, str | int | bool | list[str]]:
+) -> dict[str, str | int | bool | list[str] | list[dict[str, str]]]:
     hostname = validate_magicdns_hostname(magicdns_hostname)
     dest = next_site_path(settings.workspace_root, slug)
     web, pma = allocate_ports(
@@ -63,6 +63,17 @@ def bootstrap_site(
             clone_fn=clone_fn,
         )
 
+    extra_cloned: list[dict[str, str]] = []
+    for extra in settings.extra_clones:
+        extra_cloned.append(
+            clone_content_repo(
+                dest,
+                extra.url,
+                dest_subdir=extra.dest_subdir,
+                clone_fn=clone_fn,
+            )
+        )
+
     if start_compose:
         docker_compose_up(dest)
 
@@ -76,6 +87,7 @@ def bootstrap_site(
         "tailnet_dns_suffix": settings.tailnet_dns_suffix,
         "defaults_written": written,
         "compose_started": start_compose,
+        "extra_clones": extra_cloned,
     }
 
 

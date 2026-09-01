@@ -32,3 +32,15 @@ def copy_clone(src: Path):
         shutil.copytree(src, dest)
 
     return _clone
+
+
+def map_clone(mapping: dict[str, Path]):
+    """Copy a fixture tree chosen by git URL (env repo vs plugin/theme repos)."""
+
+    def _clone(url: str, dest: Path) -> None:
+        src = mapping.get(url)
+        if src is None:
+            raise RuntimeError(f"no fixture for clone url: {url}")
+        copy_clone(src)(url, dest)
+
+    return _clone
